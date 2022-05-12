@@ -1,18 +1,80 @@
 ---
+- name: get client.bootstrap-rbd-mirror from ceph monitor
+  ceph_key:
+    name: client.bootstrap-rbd-mirror
+    cluster: "{{ cluster }}"
+    output_format: plain
+    state: info
+  environment:
+    CEPH_CONTAINER_IMAGE: "{{ ceph_docker_registry + '/' + ceph_docker_image + ':' + ceph_docker_image_tag if containerized_deployment | bool else None }}"
+    CEPH_CONTAINER_BINARY: "{{ container_binary }}"
+  register: _rbd_mirror_key
+  delegate_to: "{{ groups.get(mon_group_name)[0] }}"
+  run_once: true
+  when: cephx | bool
+  no_log: "{{ no_log_on_ceph_key_tasks }}"
+
+- name: copy ceph key(s)
+  copy:
+    dest: "/var/lib/ceph/bootstrap-rbd-mirror/{{ cluster }}.keyring"
+    content: "{{ _rbd_mirror_key.stdout + '\n' }}"
+    owner: "{{ ceph_uid if containerized_deployment | bool else 'ceph' }}"
+    group: "{{ ceph_uid if containerized_deployment | bool else 'ceph' }}"
+    mode: "{{ ceph_keyring_permissions }}"
+  when: cephx | bool
+  no_log: "{{ no_log_on_ceph_key_tasks }}"
+
+- name: create rbd-mirror keyring
+  ceph_key:
+    name: "{{ ceph_rbd_mirror_local_user }}"
+    cluster: "{{ cluster }}"
+    user: client.bootstrap-rbd-mirror
+    user_key: "/var/lib/ceph/bootstrap-rbd-mirror/{{ cluster }}.keyring"
+    caps:
+      mon: "profile rbd-mirror"
+      osd: "profile rbd"
+    dest: "/etc/ceph/{{ cluster }}.{{ ceph_rbd_mirror_local_user }}.keyring"
+    import_key: false
+    owner: ceph
+    group: ceph
+    mode: "{{ ceph_keyring_permissions }}"
+  no_log: "{{ no_log_on_ceph_key_tasks }}"
+  when: not containerized_deployment | bool
+
 - name: enable mirroring on the pool
-  command: "{{ container_exec_cmd | default('') }} rbd --cluster {{ cluster }} --keyring /etc/ceph/{{ cluster }}.client.rbd-mirror.{{ ansible_facts['hostname'] }}.keyring --name client.rbd-mirror.{{ ansible_facts['hostname'] }} mirror pool enable {{ ceph_rbd_mirror_pool }} {{ ceph_rbd_mirror_mode }}"
+  command: "{{ container_exec_cmd | default('') }} rbd --cluster {{ cluster }} --keyring /etc/ceph/{{ cluster }}.{{ ceph_rbd_mirror_local_user }}.keyring --name {{ ceph_rbd_mirror_local_user }} mirror pool enable {{ ceph_rbd_mirror_pool }} {{ ceph_rbd_mirror_mode }}"
   register: result
   changed_when: false
   retries: 90
   delay: 1
   until: result is succeeded
 
-- name: list mirroring peer
-  command: "{{ container_exec_cmd | default('') }} rbd --cluster {{ cluster }} --keyring /etc/ceph/{{ cluster }}.client.rbd-mirror.{{ ansible_facts['hostname'] }}.keyring --name client.rbd-mirror.{{ ansible_facts['hostname'] }} mirror pool info {{ ceph_rbd_mirror_pool }}"
-  changed_when: false
-  register: mirror_peer
+- name: add mirroring peer
+  when: ceph_rbd_mirror_remote_user is defined
+  block:
+    - name: list mirroring peer
+      command: "{{ container_exec_cmd | default('') }} rbd --cluster {{ cluster }} --keyring /etc/ceph/{{ cluster }}.{{ ceph_rbd_mirror_local_user }}.keyring --name {{ ceph_rbd_mirror_local_user }} mirror pool info {{ ceph_rbd_mirror_pool }}"
+      changed_when: false
+      register: mirror_peer
 
-- name: add a mirroring peer
-  command: "{{ container_exec_cmd | default('') }} rbd --cluster {{ cluster }} --keyring /etc/ceph/{{ cluster }}.client.rbd-mirror.{{ ansible_facts['hostname'] }}.keyring --name client.rbd-mirror.{{ ansible_facts['hostname'] }} mirror pool peer add {{ ceph_rbd_mirror_pool }} {{ ceph_rbd_mirror_remote_user }}@{{ ceph_rbd_mirror_remote_cluster }}"
-  changed_when: false
-  when: ceph_rbd_mirror_remote_user not in mirror_peer.stdout
+    - name: create a temporary file
+      tempfile:
+        path: /etc/ceph
+        state: file
+        suffix: _ceph-ansible
+      register: tmp_file
+
+    - name: write secret to temporary file
+      copy:
+        dest: "{{ tmp_file.path }}"
+        content: "{{ ceph_rbd_mirror_remote_key }}"
+
+    - name: add a mirroring peer
+      command: "{{ container_exec_cmd | default('') }} rbd --cluster {{ cluster }} --keyring /var/lib/ceph/bootstrap-rbd-mirror/{{ cluster }}.keyring --name client.bootstrap-rbd-mirror mirror pool peer add {{ ceph_rbd_mirror_pool }} {{ ceph_rbd_mirror_remote_user }}@to-be-changed --remote-mon-host {{ ceph_rbd_mirror_remote_mon_hosts }} --remote-key-file {{ tmp_file.path }}"
+      changed_when: false
+      when: ceph_rbd_mirror_remote_user not in mirror_peer.stdout
+
+    - name: rm temporary file
+      file:
+        path: "{{ tmp_file.path }}"
+        state: absent

@@ -1,4 +1,12 @@
 ---
+- name: install dependencies
+  package:
+    name: rbd-mirror
+    state: present
+  register: result
+  until: result is succeeded
+  tags: package-install
+
 - name: ensure systemd service override directory exists
   file:
     state: directory

@@ -1,15 +1,9 @@
 ---
-- name: include pre_requisite.yml
-  include_tasks: pre_requisite.yml
-  when: not containerized_deployment | bool
-
-- name: include common.yml
-  include_tasks: common.yml
-  when: cephx | bool
-
 - name: tasks for non-containerized deployment
   include_tasks: start_rbd_mirror.yml
-  when: not containerized_deployment | bool
+  when:
+    - not containerized_deployment | bool
+    - ceph_rbd_mirror_remote_user is defined
 
 - name: tasks for containerized deployment
   when: containerized_deployment | bool
@@ -23,4 +17,3 @@
 
 - name: include configure_mirroring.yml
   include_tasks: configure_mirroring.yml
-  when: ceph_rbd_mirror_configure | bool
