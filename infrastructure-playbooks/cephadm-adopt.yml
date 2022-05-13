@@ -842,6 +842,13 @@
       environment:
         CEPHADM_IMAGE: '{{ ceph_docker_registry }}/{{ ceph_docker_image }}:{{ ceph_docker_image_tag }}'
 
+    - name: set autotune_memory_target_ratio
+      command: "{{ cephadm_cmd }} shell -k /etc/ceph/{{ cluster }}.client.admin.keyring --fsid {{ fsid }} -- ceph config set osd/host:{{ hostvars[inventory_hostname]['ansible_facts']['hostname'] }} autotune_memory_target_ratio {{ '0.2' if is_hci | bool else '0.7' }}"
+      changed_when: false
+      delegate_to: "{{ groups[mon_group_name][0] }}"
+      environment:
+        CEPHADM_IMAGE: '{{ ceph_docker_registry }}/{{ ceph_docker_image }}:{{ ceph_docker_image_tag }}'
+
 - name: unset osd flags
   hosts: "{{ osd_group_name|default('osds') }}"
   become: true
